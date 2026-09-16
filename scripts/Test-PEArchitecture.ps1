@@ -36,7 +36,7 @@ foreach ($file in $Path) {
     $machine = Get-PeMachine -File $file
     Write-Host "$file => $machine"
     if ($machine -ne 'ARM64') {
-        Write-Error "Expected native ARM64 but got $machine: $file"
+        Write-Error "Expected native ARM64 but got ${machine}: $file"
         $failed = $true
     }
 }
