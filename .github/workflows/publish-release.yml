@@ -1,0 +1,103 @@
+name: Publish Codex++ ARM64 Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: "Successful build workflow run ID"
+        required: true
+        default: "35099640229"
+      version:
+        description: "Codex++ version"
+        required: true
+        default: "1.3.0"
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download successful ARM64 artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+        run: |
+          mkdir -p release-assets
+          gh run download "$SOURCE_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name CodexPlusPlus-Windows-ARM64 \
+            --dir release-assets
+          ls -lah release-assets
+
+      - name: Build complete bundle ZIP
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          cd release-assets
+          zip -9 "CodexPlusPlus-Windows-ARM64.zip" \
+            "CodexPlusPlus-${VERSION}-windows-arm64-setup.exe" \
+            "CodexPlusPlus-${VERSION}-windows-arm64-portable.zip" \
+            SHA256SUMS.txt \
+            BUILD-MANIFEST.txt
+          ls -lah
+
+      - name: Verify expected release files
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          test -f "release-assets/CodexPlusPlus-${VERSION}-windows-arm64-setup.exe"
+          test -f "release-assets/CodexPlusPlus-${VERSION}-windows-arm64-portable.zip"
+          test -f "release-assets/CodexPlusPlus-Windows-ARM64.zip"
+          test -f "release-assets/SHA256SUMS.txt"
+          test -f "release-assets/BUILD-MANIFEST.txt"
+          cat release-assets/SHA256SUMS.txt
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          TAG="v${VERSION}-arm64"
+          TITLE="Codex++ ${VERSION} Windows ARM64"
+          NOTES=$(cat <<'EOF'
+          Native Windows ARM64 build of Codex++ for Surface / Windows on ARM.
+
+          Included assets:
+          - One-click NSIS setup EXE
+          - Portable ARM64 ZIP
+          - Complete delivery bundle ZIP
+          - SHA256 checksums
+          - Build manifest
+
+          The installed Codex++ launcher and manager binaries are verified native ARM64 PE (0xAA64).
+          EOF
+          )
+
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TITLE" --notes "$NOTES"
+          else
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target main --title "$TITLE" --notes "$NOTES"
+          fi
+
+          gh release upload "$TAG" \
+            "release-assets/CodexPlusPlus-${VERSION}-windows-arm64-setup.exe" \
+            "release-assets/CodexPlusPlus-${VERSION}-windows-arm64-portable.zip" \
+            "release-assets/CodexPlusPlus-Windows-ARM64.zip" \
+            "release-assets/SHA256SUMS.txt" \
+            "release-assets/BUILD-MANIFEST.txt" \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
+
+      - name: Release summary
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          echo "## Published GitHub Release" >> "$GITHUB_STEP_SUMMARY"
+          echo "Tag: v${VERSION}-arm64" >> "$GITHUB_STEP_SUMMARY"
+          echo "All five delivery files uploaded." >> "$GITHUB_STEP_SUMMARY"
