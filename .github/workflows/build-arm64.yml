@@ -159,16 +159,18 @@ jobs:
         shell: pwsh
         run: |
           $version = '${{ steps.package.outputs.version }}'
-          $candidates = @(
+          $candidateList = @(
             "${env:ProgramFiles(x86)}\NSIS\makensis.exe",
-            "$env:ProgramFiles\NSIS\makensis.exe"
+            "$env:ProgramFiles\NSIS\makensis.exe",
+            "C:\ProgramData\chocolatey\bin\makensis.exe"
           ) | Where-Object { $_ -and (Test-Path $_) }
-          if (-not $candidates) {
+          if (-not $candidateList) {
             $cmd = Get-Command makensis.exe -ErrorAction SilentlyContinue
-            if ($cmd) { $candidates = @($cmd.Source) }
+            if ($cmd) { $candidateList = @($cmd.Source) }
           }
-          if (-not $candidates) { throw 'makensis.exe not found after NSIS installation' }
-          $makensis = $candidates[0]
+          $makensis = @($candidateList) | Select-Object -First 1
+          if (-not $makensis) { throw 'makensis.exe not found after NSIS installation' }
+          Write-Host "Using NSIS: $makensis"
           Push-Location installer
           & $makensis "/INPUTCHARSET" "UTF8" "/DVERSION=$version" "CodexPlusPlus-ARM64.nsi"
           if ($LASTEXITCODE -ne 0) { throw "NSIS failed with exit code $LASTEXITCODE" }
