@@ -11,11 +11,7 @@ def replace_once(text: str, old: str, new: str, label: str) -> str:
     return text.replace(old, new, 1)
 
 
-def main() -> None:
-    if len(sys.argv) != 2:
-        raise SystemExit("usage: patch_arm64.py <upstream-root>")
-
-    root = pathlib.Path(sys.argv[1]).resolve()
+def patch_updater(root: pathlib.Path) -> None:
     path = root / "crates" / "codex-plus-core" / "src" / "update.rs"
     text = path.read_text(encoding="utf-8")
 
@@ -85,9 +81,34 @@ def main() -> None:
 
 '''
     text = replace_once(text, anchor, helper + anchor, "Windows architecture helper")
-
     path.write_text(text, encoding="utf-8")
     print(f"ARM64 updater safety patch applied: {path}")
+
+
+def patch_windows_package_api(root: pathlib.Path) -> None:
+    path = root / "crates" / "codex-plus-core" / "src" / "app_paths.rs"
+    text = path.read_text(encoding="utf-8")
+
+    old = '''        GetPackagesByPackageFamily(\n            PCWSTR(family.as_ptr()),\n            &mut count,\n            &mut buffer_length,\n            PWSTR(std::ptr::null_mut()),\n        )\n'''
+    new = '''        GetPackagesByPackageFamily(\n            PCWSTR(family.as_ptr()),\n            &mut count,\n            None,\n            &mut buffer_length,\n            PWSTR(std::ptr::null_mut()),\n        )\n'''
+    text = replace_once(
+        text,
+        old,
+        new,
+        "GetPackagesByPackageFamily probe call",
+    )
+    path.write_text(text, encoding="utf-8")
+    print(f"Windows package API compatibility patch applied: {path}")
+
+
+def main() -> None:
+    if len(sys.argv) != 2:
+        raise SystemExit("usage: patch_arm64.py <upstream-root>")
+
+    root = pathlib.Path(sys.argv[1]).resolve()
+    patch_updater(root)
+    patch_windows_package_api(root)
+    print("All Windows ARM64 compatibility patches applied successfully.")
 
 
 if __name__ == "__main__":
