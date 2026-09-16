@@ -1,0 +1,218 @@
+name: Build Codex++ Windows ARM64
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: "Optional upstream tag/branch/commit. Leave blank to use UPSTREAM_REF.txt"
+        required: false
+        default: ""
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/build-arm64.yml"
+      - "UPSTREAM_REF.txt"
+      - "scripts/**"
+      - "installer/**"
+      - "README.md"
+
+permissions:
+  contents: read
+
+jobs:
+  build-arm64:
+    name: Native Windows ARM64
+    runs-on: windows-11-arm
+    timeout-minutes: 90
+    env:
+      RUST_TARGET: aarch64-pc-windows-msvc
+      UPSTREAM_REPO: https://github.com/BigPizzaV3/CodexPlusPlus.git
+
+    steps:
+      - name: Checkout ARM64 builder
+        uses: actions/checkout@v4
+
+      - name: Resolve pinned upstream revision
+        id: upstream
+        shell: pwsh
+        run: |
+          $requested = '${{ inputs.upstream_ref }}'.Trim()
+          if ($requested) {
+            $ref = $requested
+          } else {
+            $ref = (Get-Content UPSTREAM_REF.txt -Raw).Trim()
+          }
+          if (-not $ref) { throw 'UPSTREAM_REF is empty' }
+          "ref=$ref" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "Upstream ref: $ref"
+
+      - name: Fetch CodexPlusPlus upstream
+        shell: pwsh
+        run: |
+          git clone --filter=blob:none $env:UPSTREAM_REPO upstream
+          Push-Location upstream
+          git checkout '${{ steps.upstream.outputs.ref }}'
+          git status --short
+          git rev-parse HEAD
+          Pop-Location
+
+      - name: Apply Windows ARM64 safety patch
+        shell: pwsh
+        run: python scripts/patch_arm64.py upstream
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Setup Rust stable ARM64 target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-pc-windows-msvc
+
+      - name: Show toolchain and runner architecture
+        shell: pwsh
+        run: |
+          Write-Host "PROCESSOR_ARCHITECTURE=$env:PROCESSOR_ARCHITECTURE"
+          rustc -Vv
+          cargo -V
+          node --version
+          npm --version
+
+      - name: Install frontend dependencies
+        working-directory: upstream/apps/codex-plus-manager
+        shell: pwsh
+        run: npm install --package-lock=false
+
+      - name: TypeScript check
+        working-directory: upstream/apps/codex-plus-manager
+        shell: pwsh
+        run: npm run check
+
+      - name: Build frontend
+        working-directory: upstream/apps/codex-plus-manager
+        shell: pwsh
+        run: npm run vite:build
+
+      - name: Cargo check ARM64 workspace
+        working-directory: upstream
+        shell: pwsh
+        run: cargo check --workspace --target $env:RUST_TARGET
+
+      - name: Build native ARM64 release binaries
+        working-directory: upstream
+        shell: pwsh
+        run: cargo build --release --target $env:RUST_TARGET
+
+      - name: Stage ARM64 payload and determine version
+        id: package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist/app | Out-Null
+          Copy-Item "upstream/target/$env:RUST_TARGET/release/codex-plus-plus.exe" "dist/app/codex-plus-plus.exe"
+          Copy-Item "upstream/target/$env:RUST_TARGET/release/codex-plus-plus-manager.exe" "dist/app/codex-plus-plus-manager.exe"
+
+          $match = Select-String -Path upstream/Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
+          if (-not $match) { throw 'Cannot determine upstream version from Cargo.toml' }
+          $version = $match.Matches[0].Groups[1].Value
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "CodexPlusPlus version: $version"
+
+      - name: Verify payload is native ARM64 PE
+        shell: pwsh
+        run: |
+          ./scripts/Test-PEArchitecture.ps1 -Path @(
+            'dist/app/codex-plus-plus.exe',
+            'dist/app/codex-plus-plus-manager.exe'
+          )
+
+      - name: Build portable ZIP
+        shell: pwsh
+        run: |
+          $version = '${{ steps.package.outputs.version }}'
+          $zip = "dist/CodexPlusPlus-$version-windows-arm64-portable.zip"
+          Compress-Archive -Path dist/app/* -DestinationPath $zip -Force
+          Write-Host "Created $zip"
+
+      - name: Install NSIS
+        shell: pwsh
+        run: |
+          if (Get-Command choco -ErrorAction SilentlyContinue) {
+            choco install nsis -y --no-progress
+          } elseif (Get-Command winget -ErrorAction SilentlyContinue) {
+            winget install --id NSIS.NSIS --exact --silent --accept-package-agreements --accept-source-agreements
+          } else {
+            throw 'Neither Chocolatey nor winget is available to install NSIS'
+          }
+
+      - name: Build one-click setup EXE
+        shell: pwsh
+        run: |
+          $version = '${{ steps.package.outputs.version }}'
+          $candidates = @(
+            "${env:ProgramFiles(x86)}\NSIS\makensis.exe",
+            "$env:ProgramFiles\NSIS\makensis.exe"
+          ) | Where-Object { $_ -and (Test-Path $_) }
+          if (-not $candidates) {
+            $cmd = Get-Command makensis.exe -ErrorAction SilentlyContinue
+            if ($cmd) { $candidates = @($cmd.Source) }
+          }
+          if (-not $candidates) { throw 'makensis.exe not found after NSIS installation' }
+          $makensis = $candidates[0]
+          Push-Location installer
+          & $makensis "/INPUTCHARSET" "UTF8" "/DVERSION=$version" "CodexPlusPlus-ARM64.nsi"
+          if ($LASTEXITCODE -ne 0) { throw "NSIS failed with exit code $LASTEXITCODE" }
+          Pop-Location
+
+      - name: Create SHA256 checksums
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem dist -File | Where-Object { $_.Extension -in '.exe', '.zip' }
+          if (-not $files) { throw 'No packaged files found' }
+          $lines = foreach ($file in $files) {
+            $hash = (Get-FileHash -Algorithm SHA256 $file.FullName).Hash.ToLowerInvariant()
+            "$hash  $($file.Name)"
+          }
+          $lines | Set-Content -Path dist/SHA256SUMS.txt -Encoding ascii
+          Get-Content dist/SHA256SUMS.txt
+
+      - name: Write build manifest
+        shell: pwsh
+        run: |
+          @(
+            "Builder repository: $env:GITHUB_REPOSITORY",
+            "Builder commit: $env:GITHUB_SHA",
+            "Upstream repository: $env:UPSTREAM_REPO",
+            "Upstream requested ref: ${{ steps.upstream.outputs.ref }}",
+            "Upstream resolved commit: $(git -C upstream rev-parse HEAD)",
+            "Version: ${{ steps.package.outputs.version }}",
+            "Rust target: $env:RUST_TARGET",
+            "Runner architecture: $env:PROCESSOR_ARCHITECTURE"
+          ) | Set-Content -Path dist/BUILD-MANIFEST.txt -Encoding utf8
+
+      - name: Upload installer and portable package
+        uses: actions/upload-artifact@v4
+        with:
+          name: CodexPlusPlus-Windows-ARM64
+          path: |
+            dist/CodexPlusPlus-*-windows-arm64-setup.exe
+            dist/CodexPlusPlus-*-windows-arm64-portable.zip
+            dist/SHA256SUMS.txt
+            dist/BUILD-MANIFEST.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Build summary
+        shell: pwsh
+        run: |
+          @"
+          ## Codex++ Windows ARM64 build completed
+
+          - Upstream ref: `${{ steps.upstream.outputs.ref }}`
+          - Version: `${{ steps.package.outputs.version }}`
+          - Rust target: `$env:RUST_TARGET`
+          - Payload architecture: **ARM64 verified**
+          - Artifact: **CodexPlusPlus-Windows-ARM64**
+
+          Download the Artifact from this workflow run, unzip it, verify `SHA256SUMS.txt`, then run the `*-windows-arm64-setup.exe` on the Surface Laptop Ultra.
+          "@ | Add-Content -Path $env:GITHUB_STEP_SUMMARY
